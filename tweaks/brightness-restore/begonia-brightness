@@ -1,0 +1,29 @@
+#!/bin/sh
+# Save/restore the panel backlight level across reboots.
+# The port's brightness.service writes 2047 (max) on every boot; we keep its
+# "kick" but write the level that was active at shutdown instead.
+LED=/sys/class/leds/lcd-backlight/brightness
+STATE=/var/lib/begonia/brightness
+MIN=60
+MAX=$(cat /sys/class/leds/lcd-backlight/max_brightness 2>/dev/null || echo 2047)
+
+case "$1" in
+save)
+    v=$(cat "$LED")
+    # 0 means the screen is off: keep the previously saved level
+    if [ "$v" -gt 0 ] 2>/dev/null && [ "$v" != "$(cat "$STATE" 2>/dev/null)" ]; then
+        mkdir -p "${STATE%/*}"
+        echo "$v" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+        logger -t begonia-brightness "saved $v"
+    fi
+    ;;
+restore)
+    v=$(cat "$STATE" 2>/dev/null || echo "$MAX")
+    [ "$v" -ge "$MIN" ] 2>/dev/null || v=$MIN
+    [ "$v" -le "$MAX" ] || v=$MAX
+    echo "$v" > "$LED"
+    logger -t begonia-brightness "restored $v"
+    ;;
+*)
+    echo "usage: $0 save|restore" >&2; exit 1 ;;
+esac

@@ -1,0 +1,6 @@
+[Unit]
+Description=Save current backlight level (begonia)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/begonia-brightness save

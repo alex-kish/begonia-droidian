@@ -1,0 +1,7 @@
+# ~/.config/pulse/default.pa
+# The Droidian (Ubuntu Touch derived) PulseAudio config only restores
+# per-stream volumes, so sink volume is back at 100% after every boot.
+# module-device-restore must be loaded before module-droid-card creates the
+# sinks, hence it goes first and the system config is included after it.
+load-module module-device-restore restore_port=true restore_volume=true restore_muted=true
+.include /etc/pulse/default.pa
