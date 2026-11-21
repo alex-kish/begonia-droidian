@@ -37,6 +37,14 @@ On rotation phoc raised an opaque black "shield" until all layer surfaces re-con
 - `0001` keeps the last presented frame instead of the black shield. `PHOC_MODESET_SHIELD=1` restores the old behaviour.
 - `0002` animates the rotation. Before the new transform is applied, the scene is rendered once more and copied into a texture **on the GPU** (`glCopyTexSubImage2D`, ~2 ms). `wlr_renderer_read_pixels` takes 0.6–0.8 s here, and locking swapchain buffers breaks the android renderer's per-buffer EGL surfaces. When the layout transaction is done, the new layout is copied the same way. Both frames then rotate into place as one object while cross-fading (350 ms). `PHOC_ROTATION_ANIM=0` turns it off.
 
+### gnome-usage (Debian 48.0-1)
+
+Built with `./build-debian.sh gnome-usage` (Debian source from snapshot.debian.org + our quilt patches, version `+begonia1`).
+
+The Storage view summed every mount point. On Droidian the 52 GB root filesystem is mounted 49 times (`/`, `/android/data`, `/android/vendor`, the overlays and apex mounts of the Android LXC container), so Usage showed ~280 GB. `0001` counts each filesystem once: all of its mount points report the same statfs numbers.
+
+The CPU and memory numbers were checked and are correct: memory = `MemTotal − MemAvailable`, the same as `free`, and CPU = user+nice+sys over total, including iowait and irq.
+
 ## Tweaks (`tweaks/`)
 
 - `backlight-rearm`: user service. On unblank, phosh writes the brightness to the `lm36273` backlight chip before panel bias power is up. The i2c write fails, the driver caches the level and the screen stays black. The service watches `PowerSaveMode` and, only when the write failed, re-enables the backlight (0 → level).

@@ -1,0 +1,65 @@
+From 7bc33276ecb79a9e432965f626e805ad14695fee Mon Sep 17 00:00:00 2001
+From: Alex <6164003+alex-kish@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 21:39:42 +0100
+Subject: [PATCH] storage: count each filesystem only once
+
+On systems where the same filesystem is mounted many times (bind mounts,
+overlays, Android/LXC containers) the total and available sizes were
+multiplied: a 52 GB phone showed ~280 GB. All mount points of one
+filesystem report the same statfs numbers, so skip mount points whose
+numbers were already counted. The root filesystem is always accounted for
+at /.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/storage/storage-view.vala | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/src/storage/storage-view.vala b/src/storage/storage-view.vala
+index fe68646..d0a050c 100644
+--- a/src/storage/storage-view.vala
++++ b/src/storage/storage-view.vala
+@@ -227,12 +227,26 @@ public class Usage.StorageView : Usage.View {
+         header_label.label = Environment.get_host_name ();
+     }
+ 
++    private static string filesystem_key (FsUsage usage) {
++        return "%llu:%llu:%llu:%llu:%llu:%llu".printf (
++            usage.block_size, usage.blocks, usage.bfree, usage.bavail,
++            usage.files, usage.ffree);
++    }
++
+     private void setup_mount_sizes () {
+         total_used_size = 0;
+         total_free_size = 0;
+ 
+         MountList mount_list;
+         MountEntry[] entries = GTop.get_mountlist (out mount_list, false);
++        /* The same filesystem can be mounted many times (bind mounts,
++         * overlays, containers): count each one only once. All its mount
++         * points report the same statfs numbers. The root filesystem is
++         * always accounted for at "/". */
++        var counted = new GenericSet<string> (str_hash, str_equal);
++        FsUsage root;
++        GTop.get_fsusage (out root, "/");
++        var root_key = filesystem_key (root);
+ 
+         for (int i = 0; i < mount_list.number; i++) {
+             string dir = (string) entries[i].mountdir;
+@@ -240,6 +254,13 @@ public class Usage.StorageView : Usage.View {
+             FsUsage mount;
+             GTop.get_fsusage (out mount, dir);
+ 
++            if (dir != "/") {
++                var key = filesystem_key (mount);
++                if (key == root_key || key in counted)
++                    continue;
++                counted.add (key);
++            }
++
+             var total = mount.blocks * mount.block_size;
+             var free = mount.bfree * mount.block_size;
+             var used = total - free;
+-- 
+2.53.0
+
