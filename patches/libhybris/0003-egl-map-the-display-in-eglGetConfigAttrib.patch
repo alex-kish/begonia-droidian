@@ -1,0 +1,35 @@
+From 122d734b69cedef271dcf06ea5d3f2d17f8de8d0 Mon Sep 17 00:00:00 2001
+From: Alex <6164003+alex-kish@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 22:10:45 +0100
+Subject: [PATCH] egl: map the display in eglGetConfigAttrib
+
+eglGetConfigAttrib was turned from a HYBRIS_EGL_IMPLEMENT_FUNCTION4 wrapper
+into a hand-written function (to call ws_getConfigAttrib) in 38de2ac, but
+the new function passes the hybris display handle straight to the Android
+EGL. On the wayland window system that handle is a struct _EGLDisplay *,
+so every call fails with EGL_BAD_DISPLAY. Clients that check config
+attributes (RetroArch, SDL, ...) then find no usable EGL config.
+
+Pass hybris_egl_get_real_display(dpy), like the other wrappers do.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hybris/egl/egl.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/hybris/egl/egl.c b/hybris/egl/egl.c
+index 8bbd4d1..321b732 100644
+--- a/hybris/egl/egl.c
++++ b/hybris/egl/egl.c
+@@ -638,7 +638,7 @@ EGLBoolean eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint attribute
+ 	EGLBoolean ret;
+ 	HYBRIS_TRACE_BEGIN("hybris-egl", "eglGetConfigAttrib", "");
+ 	HYBRIS_DLSYSM(egl, &_eglGetConfigAttrib, "eglGetConfigAttrib");
+-	ret = (*_eglGetConfigAttrib)(dpy, config, attribute, value);
++	ret = (*_eglGetConfigAttrib)(hybris_egl_get_real_display(dpy), config, attribute, value);
+ 	ws_getConfigAttrib(&dpy, &config, &attribute, value);
+ 	HYBRIS_TRACE_END("hybris-egl", "eglGetConfigAttrib", "");
+ 	return ret;
+-- 
+2.53.0
+
