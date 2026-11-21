@@ -1,0 +1,5 @@
+# /etc/udev/rules.d/71-begonia-fpc-not-joystick.rules
+# The fingerprint sensor creates a virtual "uinput-fpc" input device that udev
+# tags as a joystick; games/RetroArch then put it on player 1 and the real
+# gamepad on player 2.
+ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="uinput-fpc", ENV{ID_INPUT_JOYSTICK}=""

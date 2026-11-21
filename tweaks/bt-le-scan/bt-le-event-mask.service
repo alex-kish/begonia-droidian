@@ -1,0 +1,12 @@
+[Unit]
+Description=Enable LE advertising reports on begonia Bluetooth (bluebinder)
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+ExecStart=/usr/local/sbin/bt-le-event-mask
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=bluetooth.target

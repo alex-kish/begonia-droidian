@@ -19,6 +19,7 @@ libhybris already has a TLS patcher (`HYBRIS_PATCH_TLS`) that rewrites these acc
 
 - `0001` follows the register until it is redefined (or `ret`/`ldp` into it) and patches every slot 3..4 access;
 - `0002` does not treat branch immediates (`bl`, `b.cond`, ...) as register writes.
+- `0003` fixes `eglGetConfigAttrib` on Wayland. The `lindroid-drm` branch turned it into a hand-written wrapper (commit `38de2ac`) that passes the hybris display handle to the Android EGL without mapping it, so every call failed with `EGL_BAD_DISPLAY`. Any client that checks config attributes (RetroArch, SDL) found no usable config. With the fix, RetroArch runs on Mali-G76 / OpenGL ES 3.2.
 
 To enable it per application:
 
@@ -54,6 +55,15 @@ sudo vnstat --add -i wlan0 && sudo systemctl restart vnstat
 The CPU and memory numbers were checked and are correct: memory = `MemTotal − MemAvailable`, the same as `free`, and CPU = user+nice+sys over total, including iowait and irq.
 
 ## Tweaks (`tweaks/`)
+
+- `phosh/60-chvt-before-start.conf` (`/etc/systemd/system/phosh.service.d/`): Droidian runs `chvt 7` as `ExecStartPost`, in parallel with the main process taking over `/dev/tty7` (`TTYVHangup`). When the race is lost, `capsh` gets `SIGHUP` within milliseconds. phosh and hwcomposer (`BindsTo` each other) then restart in a loop with a black screen; we saw 70+ restarts after one boot. The drop-in switches the VT in `ExecStartPre` instead.
+- `bt-le-scan/` covers BLE on the MT6785 through bluebinder. Three problems, all fixed:
+  1. The controller's Supported Commands don't list the LE scan/connect commands, so the 4.14 kernel leaves LE Advertising Report, LE Connection Complete and LE Read Remote Features Complete out of the LE event mask. Scans find nothing, and LE connections hang before any ATT traffic. `bt-le-event-mask.service` re-applies the mask (`hcitool cmd 0x08 0x0001 ff 0d 08 …`) every time hci0 powers on, and `mobile-power-saver` powers Bluetooth off whenever the screen goes off.
+  2. Without LE privacy the kernel doesn't send our IRK and identity address when pairing. Xbox Series controllers then drop the bond: every reconnect fails with "PIN or Key Missing", followed by "unlikely error" on HID reads. bluetoothd ignores `Privacy=device` on this port, so the same service turns privacy on with `btmgmt privacy on <irk>`, using a fixed IRK from `/etc/bluetooth/begonia-irk`. The IRK must not change, or bonded devices won't recognise the phone after a reboot.
+  3. `50-uhid.conf` adds bluetoothd to `android_uhid`, so HID-over-GATT can create input devices.
+
+  An Xbox Series controller now pairs, reconnects after a power cycle or a bluetoothd restart, and works in RetroArch. `retroarch/71-begonia-fpc-not-joystick.rules` stops udev tagging the fingerprint sensor's `uinput-fpc` device as a joystick, which had pushed the real gamepad to player 2.
+- `retroarch/setup-retroarch.sh`: RetroArch from Debian with packaged cores (NES, SNES, GB/GBC, GBA, DS, PSX, PC Engine). It uses the `gl` driver (needs libhybris `0003`), the touch menu (`glui`) and the libretro `neo-retropad` touch overlay. ROMs go in `~/Games/ROMs`. The libretro joypad autoconfig profiles are installed too. A wired Xbox Series controller works through USB-C OTG (`xpad`) and is detected as "Xbox Series X/S Controller" with rumble.
 
 - `backlight-rearm`: user service. On unblank, phosh writes the brightness to the `lm36273` backlight chip before panel bias power is up. The i2c write fails, the driver caches the level and the screen stays black. The service watches `PowerSaveMode` and, only when the write failed, re-enables the backlight (0 → level).
 - `brightness-restore`: the port's `brightness.service` writes 2047 (max) on every boot. A drop-in replaces that with the level saved at shutdown (`/var/lib/begonia/brightness`), plus a timer saves it every 5 minutes in case the phone goes down with the screen off. Install: `begonia-brightness` → `/usr/local/sbin/`, `restore.conf` → `/etc/systemd/system/brightness.service.d/`, `begonia-brightness-save.{service,timer}` → `/etc/systemd/system/`.
