@@ -1,0 +1,41 @@
+From bfc582573690d20224fd2c52de6fef4c7c84bc30 Mon Sep 17 00:00:00 2001
+From: Alex <6164003+alex-kish@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 21:49:33 +0100
+Subject: [PATCH] network: hide interfaces without any traffic
+
+vnstat keeps daily entries with zero traffic for interfaces that exist but
+are never used. On MediaTek phones there are ~20 such modem interfaces
+(ccmni0..ccmni20), which filled the interface list and made an empty one
+the default. Skip interfaces whose traffic in the period is zero.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/network/network-view.vala | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/network/network-view.vala b/src/network/network-view.vala
+index 9f26d99..3538023 100644
+--- a/src/network/network-view.vala
++++ b/src/network/network-view.vala
+@@ -60,6 +60,18 @@ public class Usage.NetworkView : Usage.View {
+                 continue;
+             }
+ 
++            /* vnstat keeps zero entries for interfaces that exist but never
++             * carry traffic (e.g. the many ccmni modem interfaces on
++             * MediaTek phones); don't list those */
++            double interface_total = 0;
++            foreach (Vnstat.TrafficDataPoint? point in interface_daily_data) {
++                if (point != null)
++                    interface_total += ((!) point).download + ((!) point).upload;
++            }
++            if (interface_total == 0) {
++                continue;
++            }
++
+             string interface_name = iface.name;
+             NM.Device? device = devices[interface_name];
+             NetworkInterfaceGraph interface_view = new NetworkInterfaceGraph ();
+-- 
+2.53.0
+
