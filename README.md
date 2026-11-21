@@ -48,7 +48,7 @@ On rotation phoc raised an opaque black "shield" until all layer surfaces re-con
 
 ## Other findings
 
-- `mobile-power-saver` writes `0` to `devfreq1/max_freq` on screen off, which causes a kernel NULL dereference and reboot. Disabled.
+- Droidian disables systemd suspend on purpose (`AllowSuspend=no`). Power saving with the screen off comes from `mobile-power-saver`: it caps CPU frequencies, moves work to the little cores, freezes apps and services and puts Bluetooth into power save. Its write to the only devfreq device (`devfreq1`, `10012000.dvfsrc`, the DRAM/VCORE DVFS controller) oopses the kernel and reboots the phone, so `tweaks/power-saver/90_begonia.gschema.override` adds it to the `devfreq-blacklist` the daemon provides for this. Install it to `/usr/share/glib-2.0/schemas/` and run `glib-compile-schemas` there.
 - Updating via GNOME Software can remove image-only Droidian packages (network-manager `…wwan.fix`, `libglibutil`). Hold them, and upgrade only with `apt` after reviewing removals.
 - Hot-restarting `phosh.service` is unreliable on this port (BindsTo `android-service@hwcomposer`). Reboot instead.
 - Hardware VP9 decode (`droidvdec`) tops out around 4K30 / 1440p50. That is the SoC limit, not a throttling issue.

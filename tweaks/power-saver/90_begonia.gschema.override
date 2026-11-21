@@ -1,0 +1,7 @@
+# /usr/share/glib-2.0/schemas/90_begonia.gschema.override
+# mobile-power-saver sets every devfreq device to powersave on screen off.
+# On begonia the only one is the DRAM/VCORE DVFS controller
+# (10012000.dvfsrc, governor helio_dvfsrc); writing to it oopses the kernel
+# (NULL dereference) and the phone reboots. Keep the rest of the power saving.
+[org.adishatz.Mps]
+devfreq-blacklist=['devfreq1', '10012000.dvfsrc', 'dvfsrc']
