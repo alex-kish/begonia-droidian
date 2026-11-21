@@ -1,0 +1,218 @@
+From 5f6de9079a2ad401478c349c981478c9f4f603e1 Mon Sep 17 00:00:00 2001
+From: Alex <6164003+alex-kish@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 20:02:47 +0100
+Subject: [PATCH] output: animate rotation with a snapshot of the last frame
+
+Instead of freezing, take a texture of the last presented buffer when the
+output transform changes, show it rotated into the new orientation (fit,
+on black) while layer surfaces re-configure, then crossfade/zoom it out
+over the newly rendered frame. Falls back to freezing the last frame if
+the snapshot can not be created. PHOC_ROTATION_ANIMATION=0 disables it.
+---
+ src/output.c | 124 ++++++++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 119 insertions(+), 5 deletions(-)
+
+diff --git a/src/output.c b/src/output.c
+index 139e028..05211e0 100644
+--- a/src/output.c
++++ b/src/output.c
+@@ -81,6 +81,13 @@ typedef struct _PhocOutputPrivate {
+   gboolean               modeset_shield;
+   gboolean               modeset_freeze;
+ 
++  /* Rotation animation: snapshot of the last presented frame */
++  struct wlr_buffer       *last_buffer;
++  enum wl_output_transform last_transform;
++  struct wlr_texture      *rot_snapshot;
++  enum wl_output_transform rot_delta;
++  gint64                   rot_reveal_start;
++
+   GSList                *debug_damage;
+ } PhocOutputPrivate;
+ 
+@@ -136,6 +143,8 @@ on_transaction_active_changed (PhocOutput            *self,
+   if (priv->modeset_freeze) {
+     /* Clients finished re-layouting: drop the frozen frame and repaint */
+     priv->modeset_freeze = FALSE;
++    if (priv->rot_snapshot)
++      priv->rot_reveal_start = g_get_monotonic_time ();
+     wlr_damage_ring_add_whole (&self->damage_ring);
+     wlr_output_schedule_frame (self->wlr_output);
+   }
+@@ -590,6 +599,61 @@ build_debug_damage_tracking (PhocOutput *self)
+ }
+ 
+ 
++#define PHOC_ROT_REVEAL_US (260 * 1000)
++#define PHOC_ROT_ZOOM 0.12
++
++static void
++rot_clear (PhocOutputPrivate *priv)
++{
++  g_clear_pointer (&priv->rot_snapshot, wlr_texture_destroy);
++  priv->rot_reveal_start = 0;
++}
++
++
++static gboolean
++rot_active (PhocOutputPrivate *priv)
++{
++  return priv->rot_snapshot && (priv->modeset_freeze || priv->rot_reveal_start);
++}
++
++
++/* Draw the snapshot rotated into the new orientation, fit (and optionally
++ * zoomed) into the output, centered. */
++static void
++rot_add_snapshot (PhocOutput *self, struct wlr_render_pass *pass, double zoom, float alpha)
++{
++  PhocOutputPrivate *priv = phoc_output_get_instance_private (self);
++  struct wlr_output *wlr_output = self->wlr_output;
++  double tw = priv->rot_snapshot->width, th = priv->rot_snapshot->height;
++  double dw = (priv->rot_delta % 2) ? th : tw;
++  double dh = (priv->rot_delta % 2) ? tw : th;
++  double s = MIN ((double)wlr_output->width / dw, (double)wlr_output->height / dh) * zoom;
++  struct wlr_box box = {
++    .width = (int)(dw * s),
++    .height = (int)(dh * s),
++  };
++
++  box.x = (wlr_output->width - box.width) / 2;
++  box.y = (wlr_output->height - box.height) / 2;
++
++  wlr_render_pass_add_texture (pass, &(struct wlr_render_texture_options) {
++      .texture = priv->rot_snapshot,
++      .dst_box = box,
++      .transform = priv->rot_delta,
++      .alpha = &alpha,
++      .filter_mode = WLR_SCALE_FILTER_BILINEAR,
++    });
++}
++
++
++static double
++ease_out_cubic (double t)
++{
++  double f = 1.0 - t;
++  return 1.0 - f * f * f;
++}
++
++
+ PHOC_TRACE_NO_INLINE static void
+ phoc_output_draw (PhocOutput *self)
+ {
+@@ -606,10 +670,14 @@ phoc_output_draw (PhocOutput *self)
+   if (!wlr_output->enabled)
+     return;
+ 
+-  /* Mode/transform change in progress: keep showing the last frame */
+-  if (priv->modeset_freeze)
++  /* Mode/transform change in progress without a snapshot: keep showing the
++   * last frame */
++  if (priv->modeset_freeze && !priv->rot_snapshot)
+     return;
+ 
++  if (rot_active (priv))
++    wlr_damage_ring_add_whole (&self->damage_ring);
++
+   needs_frame = wlr_output->needs_frame;
+   needs_frame |= pixman_region32_not_empty (&self->damage_ring.current);
+   needs_frame |= priv->gamma_lut_changed;
+@@ -626,7 +694,7 @@ phoc_output_draw (PhocOutput *self)
+   pixman_region32_fini (&frame_damage);
+ 
+   /* Check if we can delegate the fullscreen surface to the output */
+-  if (self->fullscreen_view)
++  if (self->fullscreen_view && !rot_active (priv))
+     scanned_out = scan_out_fullscreen_view (self, self->fullscreen_view, &pending);
+ 
+   if (scanned_out)
+@@ -657,7 +725,31 @@ phoc_output_draw (PhocOutput *self)
+     .alpha = 1.0,
+     .render_pass = render_pass,
+   };
+-  phoc_renderer_render_output (priv->renderer, self, &render_context);
++  if (priv->rot_snapshot && priv->modeset_freeze) {
++    /* Waiting for clients to re-layout: show the old frame rotated into the
++     * new orientation on black */
++    wlr_render_pass_add_rect (render_pass, &(struct wlr_render_rect_options){
++        .box = { .width = wlr_output->width, .height = wlr_output->height },
++        .color = { .r = 0, .g = 0, .b = 0, .a = 1 },
++      });
++    rot_add_snapshot (self, render_pass, 1.0, 1.0);
++  } else {
++    phoc_renderer_render_output (priv->renderer, self, &render_context);
++
++    if (priv->rot_snapshot && priv->rot_reveal_start) {
++      double t = (double)(g_get_monotonic_time () - priv->rot_reveal_start) / PHOC_ROT_REVEAL_US;
++
++      if (t >= 1.0) {
++        rot_clear (priv);
++        wlr_damage_ring_add_whole (&self->damage_ring);
++      } else {
++        double e = ease_out_cubic (CLAMP (t, 0.0, 1.0));
++        /* New content shows through while the old frame grows and fades */
++        rot_add_snapshot (self, render_pass, 1.0 + e * PHOC_ROT_ZOOM, (float)(1.0 - e));
++      }
++      wlr_output_schedule_frame (wlr_output);
++    }
++  }
+ 
+   pixman_region32_fini (&buffer_damage);
+ 
+@@ -674,6 +766,11 @@ phoc_output_draw (PhocOutput *self)
+   if (!wlr_output_commit_state (wlr_output, &pending))
+     goto out;
+ 
++  if (priv->last_buffer != buffer) {
++    g_clear_pointer (&priv->last_buffer, wlr_buffer_unlock);
++    priv->last_buffer = wlr_buffer_lock (buffer);
++  }
++
+   wlr_damage_ring_rotate (&self->damage_ring);
+ 
+  out:
+@@ -771,8 +868,21 @@ phoc_output_handle_commit (struct wl_listener *listener, void *data)
+     if (configure_sent && g_strcmp0 (g_getenv ("PHOC_MODESET_SHIELD"), "1") != 0) {
+       /* Keep the last presented frame on screen instead of a black shield
+        * until the layer surfaces are re-configured (the layout transaction
+-       * times out after 3s, so the freeze is bounded). */
++       * times out after 3s, so the freeze is bounded). When possible show it
++       * rotated into the new orientation and crossfade once clients are done. */
+       priv->modeset_freeze = TRUE;
++      rot_clear (priv);
++      if (priv->last_buffer &&
++          (event->state->committed & WLR_OUTPUT_STATE_TRANSFORM) &&
++          g_strcmp0 (g_getenv ("PHOC_ROTATION_ANIMATION"), "0") != 0) {
++        priv->rot_snapshot = wlr_texture_from_buffer (self->wlr_output->renderer, priv->last_buffer);
++        priv->rot_delta = wlr_output_transform_compose (
++          wlr_output_transform_invert (priv->last_transform), self->wlr_output->transform);
++        if (!priv->rot_snapshot)
++          g_warning ("Failed to snapshot output for rotation animation");
++      }
++      wlr_damage_ring_add_whole (&self->damage_ring);
++      wlr_output_schedule_frame (self->wlr_output);
+     } else if (configure_sent &&
+         !priv->modeset_shield &&
+         !phoc_output_shield_is_raised (priv->shield)) {
+@@ -781,6 +891,8 @@ phoc_output_handle_commit (struct wl_listener *listener, void *data)
+     }
+   }
+ 
++  priv->last_transform = self->wlr_output->transform;
++
+   if (event->state->committed & (WLR_OUTPUT_STATE_ENABLED |
+                                  WLR_OUTPUT_STATE_MODE |
+                                  WLR_OUTPUT_STATE_SCALE |
+@@ -1135,6 +1247,8 @@ phoc_output_finalize (GObject *object)
+   g_clear_object (&priv->cutouts);
+   g_clear_pointer (&priv->cutouts_texture, wlr_texture_destroy);
+   g_clear_object (&priv->shield);
++  rot_clear (priv);
++  g_clear_pointer (&priv->last_buffer, wlr_buffer_unlock);
+   g_clear_object (&self->desktop);
+ 
+   G_OBJECT_CLASS (phoc_output_parent_class)->finalize (object);
+-- 
+2.53.0
+
