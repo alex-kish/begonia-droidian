@@ -40,6 +40,8 @@ On rotation phoc raised an opaque black "shield" until all layer surfaces re-con
 ## Tweaks (`tweaks/`)
 
 - `backlight-rearm`: user service. On unblank, phosh writes the brightness to the `lm36273` backlight chip before panel bias power is up. The i2c write fails, the driver caches the level and the screen stays black. The service watches `PowerSaveMode` and, only when the write failed, re-enables the backlight (0 → level).
+- `brightness-restore`: the port's `brightness.service` writes 2047 (max) on every boot. A drop-in replaces that with the level saved at shutdown (`/var/lib/begonia/brightness`), plus a timer saves it every 5 minutes in case the phone goes down with the screen off. Install: `begonia-brightness` → `/usr/local/sbin/`, `restore.conf` → `/etc/systemd/system/brightness.service.d/`, `begonia-brightness-save.{service,timer}` → `/etc/systemd/system/`.
+- `pulse/default.pa` (`~/.config/pulse/default.pa`): the Droidian PulseAudio config restores only per-stream volumes, so the speaker volume was 100% after every boot. It loads `module-device-restore` before the droid card and then includes the system config.
 - `wallpaper/`: PNG wallpapers at panel resolution (decoding is cheaper than the default SVG on rotation).
 - `firefox/user.js`: GPU rendering, HW video decode off (MTK V4L2 is not usable from Firefox).
 
