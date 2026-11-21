@@ -1,0 +1,359 @@
+From 83631ab158b7ed08abe1b158814667740dc999e2 Mon Sep 17 00:00:00 2001
+From: Alex <6164003+alex-kish@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 20:39:40 +0100
+Subject: [PATCH] output: animate rotation
+
+Before applying a new transform, render the current scene once more and copy
+it into a texture on the GPU (glCopyTexSubImage2D, ~2ms, no readback). The
+old frame stays on screen while layer surfaces re-layout. Once the layout
+transaction is done, the new layout is copied the same way and both frames
+rotate into place as one object (their box morphs from the old to the new
+screen shape) while cross-fading, 350ms ease in-out.
+
+PHOC_ROTATION_ANIM=0 disables it (falls back to freezing the last frame).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/output.c | 291 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 291 insertions(+)
+
+diff --git a/src/output.c b/src/output.c
+index 139e028..f9e17a8 100644
+--- a/src/output.c
++++ b/src/output.c
+@@ -18,6 +18,11 @@
+ #include <wlr/types/wlr_xdg_shell.h>
+ #include <wlr/util/region.h>
+ #include <wlr/util/transform.h>
++#include <wlr/types/wlr_matrix.h>
++#include <wlr/render/gles2.h>
++#include <drm_fourcc.h>
++#include <GLES2/gl2.h>
++#include <math.h>
+ 
+ #include "anim/animatable.h"
+ #include "bling.h"
+@@ -81,6 +86,14 @@ typedef struct _PhocOutputPrivate {
+   gboolean               modeset_shield;
+   gboolean               modeset_freeze;
+ 
++  /* Rotation animation */
++  struct wlr_texture    *rot_snap;
++  struct wlr_texture    *rot_new;
++  gboolean               rot_active;
++  gint64                 rot_start;
++  gint64                 rot_fade_start;
++  float                  rot_angle;
++
+   GSList                *debug_damage;
+ } PhocOutputPrivate;
+ 
+@@ -590,6 +603,276 @@ build_debug_damage_tracking (PhocOutput *self)
+ }
+ 
+ 
++#define ROT_ANIM_MS      350.0
++#define ROT_TIMEOUT_US   (4 * G_USEC_PER_SEC)
++
++static double
++ease_in_out_cubic (double t)
++{
++  return t < 0.5 ? 4 * t * t * t : 1 - pow (-2 * t + 2, 3) / 2;
++}
++
++
++/* Map a point from buffer coordinates under @old_tr to buffer coordinates
++ * under @new_tr, keeping the logical content centered and scaled by @scale. */
++static void
++rotation_map_point (int w, int h, enum wl_output_transform old_tr,
++                    enum wl_output_transform new_tr, double scale,
++                    double x, double y, double *ox, double *oy)
++{
++  int ow = (old_tr % 2) ? h : w, oh = (old_tr % 2) ? w : h;
++  int nw = (new_tr % 2) ? h : w, nh = (new_tr % 2) ? w : h;
++  struct wlr_box b = { .x = lround (x), .y = lround (y) }, l, r;
++
++  /* buffer -> old logical */
++  wlr_box_transform (&l, &b, old_tr, w, h);
++  /* old logical -> new logical */
++  l.x = lround (nw / 2.0 + (l.x - ow / 2.0) * scale);
++  l.y = lround (nh / 2.0 + (l.y - oh / 2.0) * scale);
++  /* new logical -> buffer */
++  wlr_box_transform (&r, &l, wlr_output_transform_invert (new_tr), nw, nh);
++  *ox = r.x;
++  *oy = r.y;
++}
++
++
++static gboolean
++ensure_snapshot_texture (struct wlr_output *wlr_output, struct wlr_texture **tex)
++{
++  int w = wlr_output->width, h = wlr_output->height;
++
++  if (*tex && ((*tex)->width != (guint)w || (*tex)->height != (guint)h))
++    g_clear_pointer (tex, wlr_texture_destroy);
++
++  if (!*tex) {
++    g_autofree guint8 *zero = g_malloc0 ((gsize)w * h * 4);
++    *tex = wlr_texture_from_pixels (wlr_output->renderer, DRM_FORMAT_ABGR8888, w * 4, w, h, zero);
++    if (!*tex || !wlr_texture_is_gles2 (*tex)) {
++      g_warning ("Rotation animation: can't create snapshot texture");
++      g_clear_pointer (tex, wlr_texture_destroy);
++      return FALSE;
++    }
++  }
++  return TRUE;
++}
++
++
++/* Copy the currently bound render target into @tex (GPU side, no readback) */
++static void
++copy_render_target (struct wlr_texture *tex)
++{
++  struct wlr_gles2_texture_attribs attribs;
++
++  wlr_gles2_texture_get_attribs (tex, &attribs);
++  glBindTexture (attribs.target, attribs.tex);
++  glCopyTexSubImage2D (attribs.target, 0, 0, 0, 0, 0, tex->width, tex->height);
++  glBindTexture (attribs.target, 0);
++}
++
++
++/*
++ * Before applying a new transform: render what is currently shown once more
++ * and keep a GPU copy of it. The old frame then stays on screen while clients
++ * re-layout, and once they are done both old and new frames rotate together
++ * into place while cross-fading.
++ */
++static void
++phoc_output_begin_rotation (PhocOutput *self, enum wl_output_transform new_tr)
++{
++  PhocOutputPrivate *priv = phoc_output_get_instance_private (self);
++  struct wlr_output *wlr_output = self->wlr_output;
++  struct wlr_renderer *renderer = wlr_output->renderer;
++  enum wl_output_transform old_tr = wlr_output->transform;
++  int w = wlr_output->width, h = wlr_output->height, age;
++  struct wlr_output_state state;
++  struct wlr_render_pass *pass;
++  struct wlr_buffer *buffer;
++  pixman_region32_t damage;
++  PhocRenderContext ctx;
++  double x0, y0, x1, y1;
++  gint64 t0 = g_get_monotonic_time ();
++
++  if (g_strcmp0 (g_getenv ("PHOC_ROTATION_ANIM"), "0") == 0)
++    return;
++  if (!wlr_output->enabled || w <= 0 || h <= 0 || old_tr == new_tr)
++    return;
++  /* Only plain rotations */
++  if (old_tr >= WL_OUTPUT_TRANSFORM_FLIPPED || new_tr >= WL_OUTPUT_TRANSFORM_FLIPPED)
++    return;
++
++  if (!ensure_snapshot_texture (wlr_output, &priv->rot_snap) ||
++      !ensure_snapshot_texture (wlr_output, &priv->rot_new))
++    return;
++
++  wlr_output_state_init (&state);
++  if (!wlr_output_configure_primary_swapchain (wlr_output, &state, &wlr_output->swapchain))
++    goto out;
++  buffer = wlr_swapchain_acquire (wlr_output->swapchain, &age);
++  if (!buffer)
++    goto out;
++  pass = wlr_renderer_begin_buffer_pass_for_output (renderer, buffer, NULL, (void*)wlr_output);
++  if (!pass) {
++    wlr_buffer_unlock (buffer);
++    goto out;
++  }
++  pixman_region32_init_rect (&damage, 0, 0, w, h);
++  ctx = (PhocRenderContext){ .output = self, .damage = &damage, .alpha = 1.0, .render_pass = pass };
++  phoc_renderer_render_output (priv->renderer, self, &ctx);
++  copy_render_target (priv->rot_snap);
++  wlr_render_pass_submit (pass);
++  pixman_region32_fini (&damage);
++  /* Never presented, just released back to the swapchain */
++  wlr_buffer_unlock (buffer);
++
++  /* Rotation (in buffer coordinates) that brings old content upright */
++  rotation_map_point (w, h, old_tr, new_tr, 1.0, w / 2.0, h / 2.0, &x0, &y0);
++  rotation_map_point (w, h, old_tr, new_tr, 1.0, w / 2.0 + 1000, h / 2.0, &x1, &y1);
++  priv->rot_angle = atan2 (y1 - y0, x1 - x0);
++  priv->rot_start = g_get_monotonic_time ();
++  priv->rot_fade_start = 0;
++  priv->rot_active = TRUE;
++
++  g_debug ("Rotation %d -> %d: angle %.1f°, snapshot took %" G_GINT64_FORMAT "us",
++           old_tr, new_tr, priv->rot_angle * 180 / G_PI, priv->rot_start - t0);
++ out:
++  wlr_output_state_finish (&state);
++}
++
++
++static void
++phoc_output_end_rotation (PhocOutput *self)
++{
++  PhocOutputPrivate *priv = phoc_output_get_instance_private (self);
++
++  priv->rot_active = FALSE;
++  wlr_damage_ring_add_whole (&self->damage_ring);
++  wlr_output_schedule_frame (self->wlr_output);
++}
++
++
++static void
++render_rotated (struct wlr_renderer *renderer, struct wlr_texture *tex,
++                int w, int h, double bw, double bh, double angle, double alpha)
++{
++  struct wlr_box box;
++  float mat[9], proj[9];
++
++  box.width = lround (bw);
++  box.height = lround (bh);
++  box.x = lround ((w - bw) / 2);
++  box.y = lround ((h - bh) / 2);
++  wlr_matrix_identity (proj);
++  /* Snapshots are copied from a GL window surface: rows are bottom-up */
++  wlr_matrix_project_box (mat, &box,
++                          g_strcmp0 (g_getenv ("PHOC_ROTATION_ANIM_NOFLIP"), "1") == 0 ?
++                          WL_OUTPUT_TRANSFORM_NORMAL : WL_OUTPUT_TRANSFORM_FLIPPED_180,
++                          angle, proj);
++  wlr_render_texture_with_matrix (renderer, tex, mat, alpha);
++}
++
++
++/* Returns TRUE if the frame was handled by the rotation animation */
++static gboolean
++phoc_output_draw_rotation (PhocOutput *self)
++{
++  PhocOutputPrivate *priv = phoc_output_get_instance_private (self);
++  struct wlr_output *wlr_output = self->wlr_output;
++  struct wlr_renderer *renderer = wlr_output->renderer;
++  int w = wlr_output->width, h = wlr_output->height, age;
++  gint64 now = g_get_monotonic_time ();
++  gboolean swap = fabs (sin (priv->rot_angle)) > 0.5;
++  float black[4] = { 0, 0, 0, 1 };
++  double p, bw, bh, ew, eh;
++  struct wlr_output_state pending;
++  struct wlr_render_pass *pass;
++  struct wlr_buffer *buffer;
++  pixman_region32_t damage;
++
++  if (!priv->rot_active)
++    return FALSE;
++
++  if (now - priv->rot_start > ROT_TIMEOUT_US) {
++    phoc_output_end_rotation (self);
++    return FALSE;
++  }
++
++  /* Phase 1: keep the old frame on screen until clients re-layouted */
++  if (priv->modeset_freeze)
++    return TRUE;
++
++  wlr_output_state_init (&pending);
++  pixman_region32_init_rect (&damage, 0, 0, w, h);
++  wlr_output_state_set_damage (&pending, &damage);
++
++  if (!wlr_output_configure_primary_swapchain (wlr_output, &pending, &wlr_output->swapchain))
++    goto out;
++  buffer = wlr_swapchain_acquire (wlr_output->swapchain, &age);
++  if (!buffer)
++    goto out;
++  pass = wlr_renderer_begin_buffer_pass_for_output (renderer, buffer, NULL, (void*)wlr_output);
++  if (!pass) {
++    wlr_buffer_unlock (buffer);
++    goto out;
++  }
++
++  if (!priv->rot_fade_start) {
++    /* Phase 2 starts: grab the new layout once */
++    PhocRenderContext ctx = {
++      .output = self, .damage = &damage, .alpha = 1.0, .render_pass = pass,
++    };
++
++    phoc_renderer_render_output (priv->renderer, self, &ctx);
++    copy_render_target (priv->rot_new);
++    priv->rot_fade_start = now;
++  }
++
++  p = (now - priv->rot_fade_start) / 1000.0 / ROT_ANIM_MS;
++  if (p >= 1.0) {
++    wlr_render_pass_submit (pass);
++    wlr_buffer_unlock (buffer);
++    pixman_region32_fini (&damage);
++    wlr_output_state_finish (&pending);
++    phoc_output_end_rotation (self);
++    return FALSE;
++  }
++  p = ease_in_out_cubic (p);
++
++  /*
++   * Old and new frames move as one rigid object: the old frame's box morphs
++   * from W×H into the rotated new screen, the new frame is the same box
++   * seen from the new orientation.
++   */
++  ew = swap ? h : w;
++  eh = swap ? w : h;
++  bw = w + (ew - w) * p;
++  bh = h + (eh - h) * p;
++
++  wlr_renderer_scissor (renderer, NULL);
++  wlr_renderer_clear (renderer, black);
++  render_rotated (renderer, priv->rot_new, w, h,
++                  swap ? bh : bw, swap ? bw : bh,
++                  priv->rot_angle * (p - 1.0), 1.0);
++  render_rotated (renderer, priv->rot_snap, w, h, bw, bh,
++                  priv->rot_angle * p, 1.0 - p);
++
++  if (!wlr_render_pass_submit (pass)) {
++    wlr_buffer_unlock (buffer);
++    goto out;
++  }
++  wlr_output_state_set_buffer (&pending, buffer);
++  wlr_buffer_unlock (buffer);
++
++  if (wlr_output_commit_state (wlr_output, &pending))
++    wlr_damage_ring_rotate (&self->damage_ring);
++
++ out:
++  pixman_region32_fini (&damage);
++  wlr_output_state_finish (&pending);
++  wlr_output_schedule_frame (wlr_output);
++  return TRUE;
++}
++
++
+ PHOC_TRACE_NO_INLINE static void
+ phoc_output_draw (PhocOutput *self)
+ {
+@@ -606,6 +889,9 @@ phoc_output_draw (PhocOutput *self)
+   if (!wlr_output->enabled)
+     return;
+ 
++  if (phoc_output_draw_rotation (self))
++    return;
++
+   /* Mode/transform change in progress: keep showing the last frame */
+   if (priv->modeset_freeze)
+     return;
+@@ -1113,6 +1399,8 @@ phoc_output_finalize (GObject *object)
+   PhocOutput *self = PHOC_OUTPUT (object);
+   PhocOutputPrivate *priv = phoc_output_get_instance_private (self);
+ 
++  g_clear_pointer (&priv->rot_snap, wlr_texture_destroy);
++  g_clear_pointer (&priv->rot_new, wlr_texture_destroy);
+   self->wlr_output->data = NULL;
+   self->wlr_output = NULL;
+ 
+@@ -1867,6 +2155,9 @@ output_manager_apply_config (PhocDesktop                        *desktop,
+     if (test_only) {
+       ok &= wlr_output_test_state (wlr_output, &pending);
+     } else {
++      if (config_head->state.enabled && config_head->state.transform != wlr_output->transform)
++        phoc_output_begin_rotation (output, config_head->state.transform);
++
+       wlr_output_layout_add (desktop->layout,
+                              wlr_output,
+                              config_head->state.x,
+-- 
+2.53.0
+
