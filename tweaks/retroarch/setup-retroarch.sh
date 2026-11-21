@@ -13,6 +13,13 @@ mkdir -p "$OV" ~/Games/ROMs
     https://github.com/libretro/common-overlays.git "$tmp" && git -C "$tmp" sparse-checkout set gamepads/neo-retropad \
     && cp -r "$tmp/gamepads/neo-retropad" "$tmp/COPYING" "$OV/"; rm -rf "$tmp"; }
 
+# Gamepad autoconfig profiles (not packaged in Debian):
+# https://github.com/libretro/retroarch-joypad-autoconfig (udev/)
+AC=~/.config/retroarch/autoconfig/udev
+[ -d "$AC" ] || { tmp=$(mktemp -d); git clone -q --depth 1 --filter=blob:none --sparse \
+    https://github.com/libretro/retroarch-joypad-autoconfig.git "$tmp" && git -C "$tmp" sparse-checkout set udev \
+    && mkdir -p "$AC" && cp "$tmp"/udev/*.cfg "$AC/"; rm -rf "$tmp"; }
+
 # Run once so RetroArch writes its default config, then adjust it
 [ -f ~/.config/retroarch/retroarch.cfg ] || timeout 5 retroarch >/dev/null 2>&1 || true
 python3 - <<'PY'
