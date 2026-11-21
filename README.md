@@ -43,6 +43,7 @@ On rotation phoc raised an opaque black "shield" until all layer surfaces re-con
 - `brightness-restore`: the port's `brightness.service` writes 2047 (max) on every boot. A drop-in replaces that with the level saved at shutdown (`/var/lib/begonia/brightness`), plus a timer saves it every 5 minutes in case the phone goes down with the screen off. Install: `begonia-brightness` → `/usr/local/sbin/`, `restore.conf` → `/etc/systemd/system/brightness.service.d/`, `begonia-brightness-save.{service,timer}` → `/etc/systemd/system/`.
 - `pulse/default.pa` (`~/.config/pulse/default.pa`): the Droidian PulseAudio config restores only per-stream volumes, so the speaker volume was 100% after every boot. It loads `module-device-restore` before the droid card and then includes the system config.
 - `wallpaper/`: PNG wallpapers at panel resolution (decoding is cheaper than the default SVG on rotation).
+- `printing/`: the phone as an AirPrint server for a USB-only Canon PIXMA MG2550S plugged in through USB-C OTG (CUPS + gutenprint, shared on the LAN, advertised via avahi). The port's USB is in host mode with an OTG adapter, but the phone does not charge while the printer is connected.
 - `firefox/user.js`: GPU rendering, HW video decode off (MTK V4L2 is not usable from Firefox).
 
 ## Other findings
