@@ -5,7 +5,7 @@
 #   ./build-debian.sh gnome-usage   -> out/gnome-usage/*.deb
 #
 # The Debian source (.dsc, pinned to the version the phone runs) is downloaded from snapshot.debian.org, patches/<pkg>/*.patch
-# are added as quilt patches, a local version "+begonia1" is added (sorts after
+# are added as quilt patches, a local version "+begonia2" is added (sorts after
 # Debian's binNMU "+b1"), and the package is built in the Droidian build image.
 set -eu
 
@@ -39,7 +39,7 @@ for p in /patches/*.patch; do
     cp "$p" debian/patches/
     echo "$(basename "$p")" >> debian/patches/series
 done
-DEBEMAIL=begonia@localhost DEBFULLNAME=begonia dch -v "$(dpkg-parsechangelog -S Version)+begonia1" "Apply begonia-droidian patches."
+DEBEMAIL=begonia@localhost DEBFULLNAME=begonia dch -v "$(dpkg-parsechangelog -S Version)+begonia2" "Apply begonia-droidian patches."
 mk-build-deps -i -r -t "apt-get -y --no-install-recommends" debian/control
 dpkg-buildpackage -b -uc -us
 cp ../*.deb /out/

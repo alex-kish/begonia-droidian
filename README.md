@@ -43,6 +43,14 @@ Built with `./build-debian.sh gnome-usage` (Debian source from snapshot.debian.o
 
 The Storage view summed every mount point. On Droidian the 52 GB root filesystem is mounted 49 times (`/`, `/android/data`, `/android/vendor`, the overlays and apex mounts of the Android LXC container), so Usage showed ~280 GB. `0001` counts each filesystem once: all of its mount points report the same statfs numbers.
 
+The Network view listed ~20 empty MediaTek modem interfaces (`ccmni0`…`ccmni20`) and opened an empty one by default. `0002` hides interfaces with zero traffic in the period. Wi‑Fi was missing because `vnstat` had created its database before `wlan0` existed (Wi‑Fi comes up with the Android container) and `AlwaysAddNewInterfaces` is off. Clean the database once on the phone:
+
+```sh
+for i in $(seq 2 20) -lan; do sudo vnstat --remove -i ccmni$i --force; done
+for i in dummy0 ifb0 ifb1 tunl0 ip_vti0 ip6_vti0 ip6tnl0; do sudo vnstat --remove -i $i --force; done
+sudo vnstat --add -i wlan0 && sudo systemctl restart vnstat
+```
+
 The CPU and memory numbers were checked and are correct: memory = `MemTotal − MemAvailable`, the same as `free`, and CPU = user+nice+sys over total, including iowait and irq.
 
 ## Tweaks (`tweaks/`)
