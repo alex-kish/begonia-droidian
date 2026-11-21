@@ -1,0 +1,35 @@
+From 2759c5de9c36d77b8e4c4bcc3d2ee5f20111127d Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Sat, 21 Nov 2026 18:01:58 +0100
+Subject: [PATCH 2/2] tls_patcher(aarch64): do not treat branch immediates as
+ register writes
+
+---
+ hybris/common/tls_patcher_aarch64.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/hybris/common/tls_patcher_aarch64.c b/hybris/common/tls_patcher_aarch64.c
+index fc2411d..c511eca 100644
+--- a/hybris/common/tls_patcher_aarch64.c
++++ b/hybris/common/tls_patcher_aarch64.c
+@@ -107,6 +107,17 @@ void hybris_patch_tls_arch(void* segment_addr, size_t segment_size, int tls_offs
+                 continue;
+             }
+ 
++            /* Branches, exception generation and system instructions
++             * (op0 bits 28..26 == 101): bits 0..4 are part of an immediate or
++             * a source register, not a destination. Only BL/BLR write a GPR
++             * (x30). */
++            if (((insn >> 26) & 0x7) == 0x5) {
++                if (mrs->rt == 30 && ((insn & 0xFC000000) == 0x94000000 ||
++                                      (insn & 0xFFFFFC1F) == 0xD63F0000))
++                    break;
++                continue;
++            }
++
+             /* Load pair writing the register as Rt2 (e.g. ldp x29, x30) */
+             if ((insn & LDP_MASK) == LDP_BITS && ((insn >> 10) & 0x1f) == mrs->rt)
+                 break;
+-- 
+2.55.0
+

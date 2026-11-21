@@ -1,0 +1,79 @@
+From e99b982e80bb62bc3c7076d38e48930168fe1c77 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Sat, 21 Nov 2026 17:55:51 +0100
+Subject: [PATCH 1/2] tls_patcher(aarch64): follow TPIDR_EL0 register and patch
+ all slot accesses
+
+---
+ hybris/common/tls_patcher_aarch64.c | 41 +++++++++++++++++++++++++----
+ 1 file changed, 36 insertions(+), 5 deletions(-)
+
+diff --git a/hybris/common/tls_patcher_aarch64.c b/hybris/common/tls_patcher_aarch64.c
+index 42c9635..fc2411d 100644
+--- a/hybris/common/tls_patcher_aarch64.c
++++ b/hybris/common/tls_patcher_aarch64.c
+@@ -28,6 +28,13 @@
+ #define TLS_SLOT_APP 2
+ #define TLS_SLOT_STACK_GUARD 5
+ 
++#define RET_X30 0xD65F03C0
++/* LDP/LDNP (any addressing mode): bits 29..27 = 101, bit 22 (L) = 1 */
++#define LDP_MASK 0x38400000
++#define LDP_BITS 0x28400000
++/* Max instructions to follow a register loaded from TPIDR_EL0 */
++#define TLS_SCAN_MAX 512
++
+ /* Instruction format for MRS X<rt>, TPIDR_EL0 */
+ struct __attribute__((__packed__)) mrs_inst {
+     uint8_t rt:5;        /* 0:4   - Destination register */
+@@ -72,18 +79,42 @@ void hybris_patch_tls_arch(void* segment_addr, size_t segment_size, int tls_offs
+             continue;
+         }
+ 
+-        /* Found MRS X<rt>, TPIDR_EL0, scan next few instructions for matching LDR */
+-        for (int j = 1; j < 5 && (i + j) < count; j++) {
+-            struct ldr_inst* ldr = (struct ldr_inst*)&text[i + j];
++        /* Found MRS X<rt>, TPIDR_EL0. Compilers may keep the thread pointer in
++         * this register for a long time (e.g. in callee-saved x29) and access
++         * the TLS slots through it several times, so keep following the
++         * register and patch every slot 3..4 access until it is redefined. */
++        for (size_t j = i + 1; j < count && j < i + TLS_SCAN_MAX; j++) {
++            uint32_t insn = text[j];
++            struct ldr_inst* ldr = (struct ldr_inst*)&text[j];
++
++            /* RET ends the function */
++            if (insn == RET_X30)
++                break;
++
++            /* Another MRS into the same register restarts tracking there */
++            if (((const struct mrs_inst*)&text[j])->opcode == MRS_OPCODE &&
++                ((const struct mrs_inst*)&text[j])->rt == mrs->rt)
++                break;
+ 
+-            /* Check for LDR or STR instruction using the same register as MRS */
+             if ((ldr->opcode == LDR_OPCODE || ldr->opcode == STR_OPCODE)
+                  && ldr->size == 0b11 && ldr->rn == mrs->rt) {
+                 if (ldr->imm12 > TLS_SLOT_APP && ldr->imm12 < TLS_SLOT_STACK_GUARD) {
+                     ldr->imm12 += tls_offset;
+                 }
+-                break;
++                /* LDR into the base register itself redefines it */
++                if (ldr->opcode == LDR_OPCODE && ldr->rt == mrs->rt)
++                    break;
++                continue;
+             }
++
++            /* Load pair writing the register as Rt2 (e.g. ldp x29, x30) */
++            if ((insn & LDP_MASK) == LDP_BITS && ((insn >> 10) & 0x1f) == mrs->rt)
++                break;
++
++            /* Conservatively assume any instruction with Rd/Rt == register
++             * overwrites it (also stops at stores of it, which is harmless). */
++            if ((insn & 0x1f) == mrs->rt)
++                break;
+         }
+     }
+ }
+-- 
+2.55.0
+

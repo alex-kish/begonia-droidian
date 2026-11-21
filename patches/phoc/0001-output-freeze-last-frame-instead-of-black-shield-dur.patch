@@ -1,0 +1,77 @@
+From 17eec8c24edb1f4cd60c6b81dbfe9998354d625f Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Sat, 21 Nov 2026 18:53:00 +0100
+Subject: [PATCH] output: freeze last frame instead of black shield during
+ modeset layout transaction
+
+---
+ src/output.c | 27 +++++++++++++++++++++++----
+ 1 file changed, 23 insertions(+), 4 deletions(-)
+
+diff --git a/src/output.c b/src/output.c
+index 85b1e13..139e028 100644
+--- a/src/output.c
++++ b/src/output.c
+@@ -79,6 +79,7 @@ typedef struct _PhocOutputPrivate {
+ 
+   PhocLayoutTransaction *transaction;
+   gboolean               modeset_shield;
++  gboolean               modeset_freeze;
+ 
+   GSList                *debug_damage;
+ } PhocOutputPrivate;
+@@ -126,14 +127,23 @@ on_transaction_active_changed (PhocOutput            *self,
+ {
+   PhocOutputPrivate *priv = phoc_output_get_instance_private (self);
+ 
+-  if (!priv->modeset_shield)
++  if (!priv->modeset_shield && !priv->modeset_freeze)
+     return;
+ 
+   if (phoc_layout_transaction_is_active (transaction))
+     return;
+ 
+-  priv->modeset_shield = FALSE;
+-  phoc_output_lower_shield (self, PHOC_EASING_EASE_OUT_QUINT, 150);
++  if (priv->modeset_freeze) {
++    /* Clients finished re-layouting: drop the frozen frame and repaint */
++    priv->modeset_freeze = FALSE;
++    wlr_damage_ring_add_whole (&self->damage_ring);
++    wlr_output_schedule_frame (self->wlr_output);
++  }
++
++  if (priv->modeset_shield) {
++    priv->modeset_shield = FALSE;
++    phoc_output_lower_shield (self, PHOC_EASING_EASE_OUT_QUINT, 150);
++  }
+ }
+ 
+ 
+@@ -596,6 +606,10 @@ phoc_output_draw (PhocOutput *self)
+   if (!wlr_output->enabled)
+     return;
+ 
++  /* Mode/transform change in progress: keep showing the last frame */
++  if (priv->modeset_freeze)
++    return;
++
+   needs_frame = wlr_output->needs_frame;
+   needs_frame |= pixman_region32_not_empty (&self->damage_ring.current);
+   needs_frame |= priv->gamma_lut_changed;
+@@ -754,7 +768,12 @@ phoc_output_handle_commit (struct wl_listener *listener, void *data)
+     configure_sent = phoc_layer_shell_arrange (self);
+     /* The arranging of the layer surfaces will kick of a transaction,
+      * dim screen until this finished to avoid flickering */
+-    if (configure_sent &&
++    if (configure_sent && g_strcmp0 (g_getenv ("PHOC_MODESET_SHIELD"), "1") != 0) {
++      /* Keep the last presented frame on screen instead of a black shield
++       * until the layer surfaces are re-configured (the layout transaction
++       * times out after 3s, so the freeze is bounded). */
++      priv->modeset_freeze = TRUE;
++    } else if (configure_sent &&
+         !priv->modeset_shield &&
+         !phoc_output_shield_is_raised (priv->shield)) {
+       phoc_output_raise_shield (self, FALSE);
+-- 
+2.55.0
+

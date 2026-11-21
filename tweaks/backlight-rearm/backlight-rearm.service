@@ -1,0 +1,13 @@
+[Unit]
+Description=Re-apply backlight after screen unblank (begonia lm36273 race)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/backlight-rearm.sh
+Restart=always
+StartLimitIntervalSec=0
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
