@@ -28,6 +28,8 @@ p = os.path.expanduser("~/.config/retroarch/retroarch.cfg"); s = open(p).read()
 want = {
     "video_driver": "gl", "input_driver": "wayland", "input_joypad_driver": "udev",
     "menu_driver": "glui", "video_fullscreen": "true",
+    # touch in the menu is "pointer" input; without it glui only reacts to a gamepad
+    "menu_pointer_enable": "true", "menu_mouse_enable": "true",
     "input_overlay_enable": "true",
     "input_overlay": "~/.config/retroarch/overlays/gamepads/neo-retropad/neo-retropad.cfg",
     "input_overlay_auto_scale": "true", "input_overlay_hide_in_menu": "true",
