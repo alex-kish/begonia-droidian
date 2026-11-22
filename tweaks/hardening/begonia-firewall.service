@@ -1,0 +1,15 @@
+[Unit]
+Description=Inbound firewall (iptables-legacy, BEGONIA-IN chain)
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/begonia-firewall start
+ExecStop=/usr/local/sbin/begonia-firewall stop
+
+[Install]
+WantedBy=multi-user.target
