@@ -1,0 +1,66 @@
+From af3f672ba41e29f23e02e0ef63c157ecfaec219b Mon Sep 17 00:00:00 2001
+From: alex-kish <alex-kish@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 02:12:31 +0100
+Subject: [PATCH] output: render rotation snapshots with damage in layout
+ coordinates
+
+phoc_renderer_render_output() takes damage in layout coordinates and
+transforms it to buffer coordinates itself. The rotation snapshots
+passed the buffer size (1080x2340) instead, which in landscape
+(2340x1080 logical) got clipped to a 1080x1080 square. Only that part
+of the old frame was rendered, the rest of the snapshot stayed dark,
+and that's what the screen showed when the rotation animation started.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/output.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/src/output.c b/src/output.c
+index d96eb26..9e17d4f 100644
+--- a/src/output.c
++++ b/src/output.c
+@@ -683,7 +683,7 @@ phoc_output_begin_rotation (PhocOutput *self, enum wl_output_transform new_tr)
+   struct wlr_output *wlr_output = self->wlr_output;
+   struct wlr_renderer *renderer = wlr_output->renderer;
+   enum wl_output_transform old_tr = wlr_output->transform;
+-  int w = wlr_output->width, h = wlr_output->height, age;
++  int w = wlr_output->width, h = wlr_output->height, age, lw, lh;
+   struct wlr_output_state state;
+   struct wlr_render_pass *pass;
+   struct wlr_buffer *buffer;
+@@ -715,7 +715,9 @@ phoc_output_begin_rotation (PhocOutput *self, enum wl_output_transform new_tr)
+     wlr_buffer_unlock (buffer);
+     goto out;
+   }
+-  pixman_region32_init_rect (&damage, 0, 0, w, h);
++  /* The render context takes damage in layout (logical) coordinates */
++  wlr_output_transformed_resolution (wlr_output, &lw, &lh);
++  pixman_region32_init_rect (&damage, 0, 0, lw, lh);
+   ctx = (PhocRenderContext){ .output = self, .damage = &damage, .alpha = 1.0, .render_pass = pass };
+   phoc_renderer_render_output (priv->renderer, self, &ctx);
+   copy_render_target (priv->rot_snap);
+@@ -816,12 +818,18 @@ phoc_output_draw_rotation (PhocOutput *self)
+   }
+ 
+   if (!priv->rot_fade_start) {
+-    /* Phase 2 starts: grab the new layout once */
++    /* Phase 2 starts: grab the new layout once. The render context takes
++     * damage in layout (logical) coordinates, @damage is in buffer ones. */
++    pixman_region32_t logical;
+     PhocRenderContext ctx = {
+-      .output = self, .damage = &damage, .alpha = 1.0, .render_pass = pass,
++      .output = self, .damage = &logical, .alpha = 1.0, .render_pass = pass,
+     };
++    int lw, lh;
+ 
++    wlr_output_transformed_resolution (wlr_output, &lw, &lh);
++    pixman_region32_init_rect (&logical, 0, 0, lw, lh);
+     phoc_renderer_render_output (priv->renderer, self, &ctx);
++    pixman_region32_fini (&logical);
+     copy_render_target (priv->rot_new);
+     priv->rot_fade_start = now;
+   }
+-- 
+2.53.0
+

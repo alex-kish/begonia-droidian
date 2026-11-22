@@ -3,6 +3,7 @@
 #
 #   ./build.sh libhybris        -> out/libhybris/*.deb
 #   ./build.sh phoc             -> out/phoc/*.deb
+#   ./build.sh phosh            -> out/phosh/*.deb
 #
 # Sources are taken from the Droidian GitHub branch the phone runs,
 # patches/<pkg>/*.patch are applied on top as git commits, and the package is
@@ -10,13 +11,14 @@
 # derives the version from git, so our build sorts after the official one).
 set -eu
 
-PKG=${1:?usage: $0 <libhybris|phoc>}
+PKG=${1:?usage: $0 <libhybris|phoc|phosh>}
 HERE=$(cd "$(dirname "$0")" && pwd)
 IMAGE=quay.io/droidian/build-essential:next-arm64
 
 case "$PKG" in
     libhybris) REPO=https://github.com/droidian/libhybris.git; BRANCH=feature/next/lindroid-drm; BASE=91f805b ;;
     phoc)      REPO=https://github.com/droidian/phoc.git;      BRANCH=group/next/phosh-0.47;    BASE=7e682c6 ;;
+    phosh)     REPO=https://github.com/droidian/phosh.git;     BRANCH=group/next/phosh-0.55;    BASE=bee1861 ;;
     *) echo "unknown package $PKG" >&2; exit 1 ;;
 esac
 

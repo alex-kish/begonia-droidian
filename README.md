@@ -7,6 +7,7 @@ Packages are built exactly like Droidian CI does (`quay.io/droidian/build-essent
 ```sh
 ./build.sh libhybris   # -> out/libhybris/*.deb
 ./build.sh phoc        # -> out/phoc/*.deb
+./build.sh phosh       # -> out/phosh/*.deb
 ```
 
 ## Patches
@@ -38,6 +39,13 @@ On rotation phoc raised an opaque black "shield" until all layer surfaces re-con
 - `0001` keeps the last presented frame instead of the black shield. `PHOC_MODESET_SHIELD=1` restores the old behaviour.
 - `0002` animates the rotation. Before the new transform is applied, the scene is rendered once more and copied into a texture **on the GPU** (`glCopyTexSubImage2D`, ~2 ms). `wlr_renderer_read_pixels` takes 0.6–0.8 s here, and locking swapchain buffers breaks the android renderer's per-buffer EGL surfaces. When the layout transaction is done, the new layout is copied the same way. Both frames then rotate into place as one object while cross-fading (350 ms). `PHOC_ROTATION_ANIM=0` turns it off.
 - `0003` fixes the layout transaction bookkeeping. Every now and then a rotation froze for the full 3 s timeout (`Timeout (3000ms) expired with 1 configures pending`), and a late ack later hit `assertion 'self->pending_layer_configures > 0' failed`. Unmapped layer surfaces joined the transaction although they may not commit until shown again, and a surface unmapped or destroyed while its configure was pending never left it. Now only mapped surfaces join, they leave on unmap/destroy, and configures from a timed-out transaction are dropped (generation counter).
+
+- `0004` keeps folded drag surfaces folded when their size changes. phosh's top panel is a full-height layer surface pushed up by a negative margin, `-(height - top bar)`. After rotating to portrait it committed its new height together with the new folded margin, but phoc only stored the margin and left the panel at the old one, so the bottom of the panel ("Нет уведомлений") stuck out for a moment. A surface resting at its folded margin now moves to the new one right away.
+- `0005` fixes the rotation snapshots of `0002`: `phoc_renderer_render_output()` takes damage in layout coordinates, and passing the buffer size (1080×2340) clipped it to 1080×1080 in landscape. Only that square of the old frame was rendered, so most of the screen went dark when the animation started.
+
+### phosh (`group/next/phosh-0.55`)
+
+- `0001` rescales the already loaded wallpaper right away when the background surface gets a new size, instead of after the async cache fetch, so the first frame after a rotation doesn't show the old image plus the fill colour.
 
 ### gnome-usage (Debian 48.0-1)
 
