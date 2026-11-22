@@ -1,0 +1,38 @@
+#!/bin/sh
+# Run the CPU at full speed for a moment whenever the device orientation
+# changes (iio-sensor-proxy AccelerometerOrientation), so phosh redraws its
+# panels for the new screen size faster and the rotation finishes sooner.
+#
+# The MediaTek PPM driver overrides cpufreq scaling_min_freq, the minimum
+# frequency has to be set via /proc/ppm/policy/userlimit_min_cpu_freq
+# ("<cluster> <kHz>", "-1" = no limit).
+PPM=/proc/ppm/policy/userlimit_min_cpu_freq
+BOOST_SECONDS=${BOOST_SECONDS:-1.5}
+CPUFREQ=/sys/devices/system/cpu/cpufreq
+
+[ -w "$PPM" ] || { echo "no $PPM, nothing to do" >&2; exit 0; }
+
+# cluster 0 = little cores (policy0), cluster 1 = big cores (policy6)
+MAX0=$(cat $CPUFREQ/policy0/cpuinfo_max_freq)
+MAX1=$(cat $CPUFREQ/policy6/cpuinfo_max_freq)
+
+boost_on()  { echo "0 $MAX0" > $PPM; echo "1 $MAX1" > $PPM; }
+boost_off() { echo "0 -1" > $PPM; echo "1 -1" > $PPM; }
+
+timer=
+cleanup() { [ -n "$timer" ] && kill "$timer" 2>/dev/null; boost_off; exit 0; }
+trap cleanup INT TERM
+
+dbus-monitor --system \
+    "type='signal',sender='net.hadess.SensorProxy',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'" |
+while read -r line; do
+    case "$line" in
+    *AccelerometerOrientation*)
+        boost_on
+        # every new rotation extends the boost
+        [ -n "$timer" ] && kill "$timer" 2>/dev/null
+        (sleep "$BOOST_SECONDS"; boost_off) &
+        timer=$!
+        ;;
+    esac
+done

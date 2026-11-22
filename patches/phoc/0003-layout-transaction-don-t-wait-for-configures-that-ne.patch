@@ -1,0 +1,214 @@
+From 179ae08102f9645b5ccdfc232dd5ed7831a4cda1 Mon Sep 17 00:00:00 2001
+From: alex-kish <alex-kish@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 01:32:22 +0100
+Subject: [PATCH] layout-transaction: don't wait for configures that never get
+ acked
+
+A rotation sometimes froze the screen for the full 3s timeout
+("Timeout (3000ms) expired with 1 configures pending") followed later by
+"phoc_layout_transaction_notify_layer_configured: assertion
+'self->pending_layer_configures > 0' failed".
+
+Layer surfaces joined the transaction even when unmapped, and a surface
+that got unmapped or destroyed while its configure was pending never
+left it again. Both stall the transaction until the timeout. After the
+timeout the surface still had its pending serial, so its late ack
+decremented the counter of a transaction it wasn't part of.
+
+- only mapped layer surfaces join the transaction
+- leave it on unmap and on destroy
+- count aborted transactions (generation), so stale configures are
+  dropped instead of being reported
+- only freeze / shield the output when a transaction actually started
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/layer-surface.c      | 45 ++++++++++++++++++++++++++++++++++------
+ src/layer-surface.h      |  1 +
+ src/layout-transaction.c | 22 ++++++++++++++++++++
+ src/layout-transaction.h |  1 +
+ src/output.c             |  4 ++++
+ 5 files changed, 67 insertions(+), 6 deletions(-)
+
+diff --git a/src/layer-surface.c b/src/layer-surface.c
+index 9335d6c..2db26d6 100644
+--- a/src/layer-surface.c
++++ b/src/layer-surface.c
+@@ -54,6 +54,25 @@ G_DEFINE_TYPE_WITH_CODE (PhocLayerSurface, phoc_layer_surface, G_TYPE_OBJECT,
+ 
+ static void phoc_layer_surface_apply_damage (PhocLayerSurface *self);
+ 
++/*
++ * Stop being part of the layout transaction. When the configure is still
++ * part of the current transaction tell it, otherwise (the transaction
++ * timed out meanwhile) just forget it.
++ */
++static void
++phoc_layer_surface_leave_transaction (PhocLayerSurface *self)
++{
++  PhocLayoutTransaction *transaction = phoc_layout_transaction_get_default ();
++
++  if (!self->pending_serial)
++    return;
++
++  if (self->pending_generation == phoc_layout_transaction_get_generation (transaction))
++    phoc_layout_transaction_notify_layer_configured (transaction);
++
++  self->pending_serial = 0;
++}
++
+ static void
+ phoc_layer_surface_child_root_get_box (PhocChildRoot *root, struct wlr_box *box)
+ {
+@@ -279,8 +298,7 @@ handle_surface_commit (struct wl_listener *listener, void *data)
+   if (self->pending_serial &&
+       self->layer_surface->current.configure_serial >= self->pending_serial) {
+     g_debug ("layer-surface ack'ed serial %d", self->layer_surface->current.configure_serial);
+-    phoc_layout_transaction_notify_layer_configured (phoc_layout_transaction_get_default ());
+-    self->pending_serial = 0;
++    phoc_layer_surface_leave_transaction (self);
+   }
+ }
+ 
+@@ -374,6 +392,8 @@ handle_unmap (struct wl_listener *listener, void *data)
+   PhocOutput *output = phoc_layer_surface_get_output (self);
+ 
+   self->mapped = false;
++  /* An unmapped surface won't commit a buffer for the configure */
++  phoc_layer_surface_leave_transaction (self);
+ 
+   wl_list_remove (&self->new_subsurface.link);
+   phoc_layer_surface_drop_child_surfaces (self);
+@@ -394,6 +414,8 @@ handle_destroy (struct wl_listener *listener, void *data)
+ {
+   PhocLayerSurface *self = wl_container_of (listener, self, destroy);
+ 
++  /* A destroyed surface never acks the configure */
++  phoc_layer_surface_leave_transaction (self);
+   g_object_unref (self);
+ }
+ 
+@@ -710,12 +732,22 @@ phoc_layer_surface_covers_output (PhocLayerSurface *self)
+ void
+ phoc_layer_surface_send_configure (PhocLayerSurface *self)
+ {
++  PhocLayoutTransaction *transaction = phoc_layout_transaction_get_default ();
+   guint32 pending_serial;
+   g_assert (PHOC_IS_LAYER_SURFACE (self));
+ 
+-  /* We're not part of a transaction yet but need to */
+-  if (!self->pending_serial)
+-    phoc_layout_transaction_add_layer_dirty (phoc_layout_transaction_get_default ());
++  /* The transaction this configure was part of timed out */
++  if (self->pending_serial &&
++      self->pending_generation != phoc_layout_transaction_get_generation (transaction))
++    self->pending_serial = 0;
++
++  /* We're not part of a transaction yet but need to. Unmapped surfaces
++   * aren't visible and may not commit until they get mapped again, so
++   * waiting for them would only stall the transaction until it times out. */
++  if (!self->pending_serial && self->mapped) {
++    phoc_layout_transaction_add_layer_dirty (transaction);
++    self->pending_generation = phoc_layout_transaction_get_generation (transaction);
++  }
+ 
+   pending_serial = wlr_layer_surface_v1_configure (self->layer_surface,
+                                                    self->geo.width,
+@@ -724,7 +756,8 @@ phoc_layer_surface_send_configure (PhocLayerSurface *self)
+            self,
+            self->pending_serial,
+            pending_serial);
+-  self->pending_serial = pending_serial;
++  if (self->pending_serial || self->mapped)
++    self->pending_serial = pending_serial;
+ }
+ 
+ /**
+diff --git a/src/layer-surface.h b/src/layer-surface.h
+index 3f419aa..100e547 100644
+--- a/src/layer-surface.h
++++ b/src/layer-surface.h
+@@ -42,6 +42,7 @@ struct _PhocLayerSurface {
+   GSList            *child_surfaces;
+   /* Last not yet ACKed serial */
+   uint32_t           pending_serial;
++  guint              pending_generation;
+ };
+ 
+ PhocLayerSurface *phoc_layer_surface_new (struct wlr_layer_surface_v1 *layer_surface);
+diff --git a/src/layout-transaction.c b/src/layout-transaction.c
+index 91b905e..7df10d2 100644
+--- a/src/layout-transaction.c
++++ b/src/layout-transaction.c
+@@ -38,6 +38,9 @@ struct _PhocLayoutTransaction {
+   gint64                starttime;
+   guint                 pending_layer_configures;
+   guint                 layer_timer_id;
++  /* Bumped when a transaction is aborted so configures that were pending
++   * in it can't be counted against a later one */
++  guint                 generation;
+ };
+ G_DEFINE_TYPE (PhocLayoutTransaction, phoc_layout_transaction, G_TYPE_OBJECT)
+ 
+@@ -57,6 +60,7 @@ abort_transaction (PhocLayoutTransaction *self)
+   apply_transaction (self);
+ 
+   self->pending_layer_configures = 0;
++  self->generation++;
+   g_object_notify_by_pspec (G_OBJECT (self), props[PROP_ACTIVE]);
+ }
+ 
+@@ -166,6 +170,24 @@ phoc_layout_transaction_is_active (PhocLayoutTransaction *self)
+   return self->pending_layer_configures > 0;
+ }
+ 
++/**
++ * phoc_layout_transaction_get_generation:
++ * @self: The transaction
++ *
++ * Layer surfaces remember the generation they joined a transaction in.
++ * Once a transaction got aborted (timeout) the generation changes and
++ * stale configures must not be reported anymore.
++ *
++ * Returns: The current generation
++ */
++guint
++phoc_layout_transaction_get_generation (PhocLayoutTransaction *self)
++{
++  g_assert (PHOC_IS_LAYOUT_TRANSACTION (self));
++
++  return self->generation;
++}
++
+ /**
+  * phoc_layout_transaction_add_layer_dirty:
+  * @self: The transaction
+diff --git a/src/layout-transaction.h b/src/layout-transaction.h
+index 63b6c15..5aa6814 100644
+--- a/src/layout-transaction.h
++++ b/src/layout-transaction.h
+@@ -20,5 +20,6 @@ PhocLayoutTransaction *
+ gboolean          phoc_layout_transaction_is_active (PhocLayoutTransaction *self);
+ void              phoc_layout_transaction_notify_layer_configured (PhocLayoutTransaction *self);
+ void              phoc_layout_transaction_add_layer_dirty (PhocLayoutTransaction *self);
++guint             phoc_layout_transaction_get_generation (PhocLayoutTransaction *self);
+ 
+ G_END_DECLS
+diff --git a/src/output.c b/src/output.c
+index f9e17a8..d96eb26 100644
+--- a/src/output.c
++++ b/src/output.c
+@@ -1052,6 +1052,10 @@ phoc_output_handle_commit (struct wl_listener *listener, void *data)
+     gboolean configure_sent;
+ 
+     configure_sent = phoc_layer_shell_arrange (self);
++    /* Configures to unmapped layer surfaces don't start a transaction,
++     * nothing would lower the shield / unfreeze then */
++    configure_sent = configure_sent &&
++      phoc_layout_transaction_is_active (phoc_layout_transaction_get_default ());
+     /* The arranging of the layer surfaces will kick of a transaction,
+      * dim screen until this finished to avoid flickering */
+     if (configure_sent && g_strcmp0 (g_getenv ("PHOC_MODESET_SHIELD"), "1") != 0) {
+-- 
+2.53.0
+

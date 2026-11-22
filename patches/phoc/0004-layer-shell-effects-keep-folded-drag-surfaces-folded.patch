@@ -1,0 +1,91 @@
+From b03263f3d18a5b8ae014a066f5198411e6d195d4 Mon Sep 17 00:00:00 2001
+From: alex-kish <alex-kish@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 01:53:36 +0100
+Subject: [PATCH] layer-shell-effects: keep folded drag surfaces folded when
+ their size changes
+
+The folded margin of a draggable layer surface depends on its size
+(phosh's top panel: -(height - top bar height)). On rotation the client
+commits its new size together with the new folded margin, but phoc only
+stored the margin and kept the surface at the old one unless it was
+animating. After rotating to portrait the top panel then stuck out by
+the height difference and showed part of the notification list for a
+moment.
+
+Move a surface that rests folded at the old folded margin to the new
+one right away. Margins set for the first time are left alone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/layer-shell-effects.c | 41 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/src/layer-shell-effects.c b/src/layer-shell-effects.c
+index 10676fe..bb86f1d 100644
+--- a/src/layer-shell-effects.c
++++ b/src/layer-shell-effects.c
+@@ -138,6 +138,7 @@ G_DEFINE_TYPE (PhocLayerShellEffects, phoc_layer_shell_effects, G_TYPE_OBJECT)
+ 
+ static PhocLayerShellEffects     *phoc_layer_shell_effects_from_resource     (struct wl_resource *resource);
+ static PhocDraggableLayerSurface *phoc_draggable_layer_surface_from_resource (struct wl_resource *resource);
++static void                       apply_margin (PhocDraggableLayerSurface *drag_surface, double margin);
+ static PhocAlphaLayerSurface     *phoc_alpha_layer_surface_from_resource     (struct wl_resource *resource);
+ static PhocStackedLayerSurface   *phoc_stacked_layer_surface_from_resource   (struct wl_resource *resource);
+ 
+@@ -635,6 +636,7 @@ draggable_layer_surface_handle_commit (struct wl_listener *listener, void *data)
+     wl_container_of(listener, drag_surface, surface_handle_commit);
+   PhocLayerSurface *layer_surface = drag_surface->layer_surface;
+   gboolean changed = FALSE;
++  int32_t old_folded = drag_surface->current.folded;
+ 
+   if (layer_surface == NULL)
+     return;
+@@ -643,6 +645,45 @@ draggable_layer_surface_handle_commit (struct wl_listener *listener, void *data)
+     drag_surface->current.folded = drag_surface->pending.folded;
+     changed = TRUE;
+   }
++
++  /* The folded margin depends on the surface size, so it changes e.g. on
++   * rotation. A surface resting folded has to move along, otherwise it sticks
++   * out at its new size (the top panel showing part of the notification
++   * list after rotating to portrait) until it gets folded again.
++   * old_folded is 0 until the client set the margins for the first time. */
++  if (changed && old_folded != 0 &&
++      drag_surface->state == PHOC_DRAGGABLE_SURFACE_STATE_NONE &&
++      drag_surface->drag.last_state == ZPHOC_DRAGGABLE_LAYER_SURFACE_V1_DRAG_END_STATE_FOLDED) {
++    struct wlr_layer_surface_v1 *wlr_layer_surface = layer_surface->layer_surface;
++    PhocOutput *output = phoc_layer_surface_get_output (layer_surface);
++    gboolean resting_folded;
++
++    switch (wlr_layer_surface->current.anchor) {
++    case PHOC_LAYER_SHELL_EFFECT_DRAG_FROM_TOP:
++      resting_folded = wlr_layer_surface->current.margin.top == old_folded;
++      break;
++    case PHOC_LAYER_SHELL_EFFECT_DRAG_FROM_BOTTOM:
++      resting_folded = wlr_layer_surface->current.margin.bottom == old_folded;
++      break;
++    case PHOC_LAYER_SHELL_EFFECT_DRAG_FROM_LEFT:
++      resting_folded = wlr_layer_surface->current.margin.left == old_folded;
++      break;
++    case PHOC_LAYER_SHELL_EFFECT_DRAG_FROM_RIGHT:
++      resting_folded = wlr_layer_surface->current.margin.right == old_folded;
++      break;
++    default:
++      resting_folded = FALSE;
++      break;
++    }
++
++    if (resting_folded && output) {
++      g_debug ("Drag surface %p: folded margin %d -> %d", drag_surface,
++               old_folded, drag_surface->current.folded);
++      apply_margin (drag_surface, drag_surface->current.folded);
++      phoc_layer_shell_arrange (output);
++      phoc_output_damage_whole (output);
++    }
++  }
+   drag_surface->current.unfolded = drag_surface->pending.unfolded;
+   drag_surface->current.exclusive = drag_surface->pending.exclusive;
+   drag_surface->current.threshold = drag_surface->pending.threshold;
+-- 
+2.53.0
+

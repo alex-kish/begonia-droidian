@@ -1,0 +1,117 @@
+From 94b53b5507a16d78efa7e77220a3b13152ef617e Mon Sep 17 00:00:00 2001
+From: alex-kish <alex-kish@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 02:02:40 +0100
+Subject: [PATCH] background: rescale the loaded image right away when the size
+ changes
+
+On rotation the background got configured with the new size, but the
+image was only rescaled after the async cache fetch. The first frame at
+the new size therefore showed the old (landscape) image in the top part
+and the plain fill colour below it. phoc shows exactly that frame while
+it animates the rotation, so most of the screen flashed dark.
+
+Rescale the already loaded image synchronously in configured() and skip
+the then redundant rescale when the fetch returns the same image.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/background.c | 48 ++++++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 42 insertions(+), 6 deletions(-)
+
+diff --git a/src/background.c b/src/background.c
+index 19245c90..eea8753c 100644
+--- a/src/background.c
++++ b/src/background.c
+@@ -66,6 +66,9 @@ struct _PhoshBackground
+   GdkRGBA                  color;
+   GdkPixbuf               *pixbuf;
+   gboolean                 needs_update;
++  /* Size self->pixbuf was scaled for */
++  int                      scaled_width;
++  int                      scaled_height;
+ 
+   /* The monitor backed by PhoshBackground */
+   gboolean                 primary;
+@@ -237,6 +240,28 @@ phosh_background_draw (GtkWidget *widget, cairo_t *cr)
+ }
+ 
+ 
++static void
++get_target_size (PhoshBackground *self, int *width, int *height)
++{
++  if (self->primary) {
++    phosh_shell_get_usable_area (phosh_shell_get_default (), NULL, NULL, width, height);
++  } else {
++    *width = phosh_layer_surface_get_configured_width (PHOSH_LAYER_SURFACE (self));
++    *height = phosh_layer_surface_get_configured_height (PHOSH_LAYER_SURFACE (self));
++  }
++}
++
++
++static gboolean
++pixbuf_fits (PhoshBackground *self)
++{
++  int width, height;
++
++  get_target_size (self, &width, &height);
++  return self->pixbuf && width == self->scaled_width && height == self->scaled_height;
++}
++
++
+ static void
+ update_image (PhoshBackground *self)
+ {
+@@ -245,12 +270,7 @@ update_image (PhoshBackground *self)
+   if (!self->configured)
+     return;
+ 
+-  if (self->primary) {
+-    phosh_shell_get_usable_area (phosh_shell_get_default (), NULL, NULL, &width, &height);
+-  } else {
+-    width = phosh_layer_surface_get_configured_width (PHOSH_LAYER_SURFACE (self));
+-    height = phosh_layer_surface_get_configured_height (PHOSH_LAYER_SURFACE (self));
+-  }
++  get_target_size (self, &width, &height);
+ 
+   g_return_if_fail (width > 0 && height > 0);
+ 
+@@ -259,6 +279,8 @@ update_image (PhoshBackground *self)
+   g_clear_object (&self->pixbuf);
+   self->pixbuf = image_background (self->cached_bg_image, width, height,
+                                    self->style, &self->color);
++  self->scaled_width = width;
++  self->scaled_height = height;
+ 
+   self->needs_update = FALSE;
+   gtk_widget_queue_draw (GTK_WIDGET (self));
+@@ -282,6 +304,12 @@ on_background_cache_fetch_ready (GObject *source_object, GAsyncResult *res, gpoi
+   g_assert (PHOSH_IS_BACKGROUND (self));
+   g_assert (PHOSH_IS_BACKGROUND_CACHE (cache));
+ 
++  /* Already rescaled when the size changed (see phosh_background_configured) */
++  if (image == self->cached_bg_image && pixbuf_fits (self)) {
++    self->needs_update = FALSE;
++    return;
++  }
++
+   g_set_object (&self->cached_bg_image, image);
+   update_image (self);
+ }
+@@ -327,6 +355,14 @@ phosh_background_configured (PhoshLayerSurface *layer_surface)
+   PHOSH_LAYER_SURFACE_CLASS (phosh_background_parent_class)->configured (layer_surface);
+ 
+   self->configured = TRUE;
++
++  /* On a size change (e.g. rotation) rescale the image we already have right
++   * away. Otherwise the first frame at the new size shows the old image in
++   * one corner and the fill colour elsewhere until the async fetch is done,
++   * and that frame is what the compositor shows while rotating. */
++  if (self->cached_bg_image && self->pixbuf && !pixbuf_fits (self))
++    update_image (self);
++
+   trigger_update (self);
+ }
+ 
+-- 
+2.53.0
+
