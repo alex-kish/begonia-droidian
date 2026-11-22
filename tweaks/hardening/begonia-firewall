@@ -1,0 +1,65 @@
+#!/bin/sh
+# Inbound firewall for the phone. The begonia kernel has no nf_tables,
+# so this uses iptables-legacy. Everything lives in our own chain
+# (BEGONIA-IN), jumped to from INPUT, so other rules (NetworkManager
+# hotspot/VPN) are left alone and "stop" is a clean undo.
+#
+# Allowed in: loopback, replies to our own traffic, ICMP, SSH (keys only),
+# mDNS (redminote8pro.local, AirPrint discovery), DHCP, DNS for the
+# hotspot's dnsmasq, everything from the Mac over USB (rndis0), and
+# CUPS/IPP (AirPrint server, tweaks/printing) from private networks only.
+set -eu
+
+V4=/usr/sbin/iptables-legacy
+V6=/usr/sbin/ip6tables-legacy
+CHAIN=BEGONIA-IN
+
+common() {
+    T=$1
+    $T -A $CHAIN -i lo -j ACCEPT
+    $T -A $CHAIN -i rndis0 -j ACCEPT
+    $T -A $CHAIN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    $T -A $CHAIN -m conntrack --ctstate INVALID -j DROP
+    $T -A $CHAIN -p tcp --dport 22 -j ACCEPT
+    $T -A $CHAIN -p udp --dport 5353 -j ACCEPT
+    $T -A $CHAIN -p udp --dport 53 -j ACCEPT
+    $T -A $CHAIN -p tcp --dport 53 -j ACCEPT
+}
+
+start() {
+    stop
+    $V4 -N $CHAIN
+    common $V4
+    $V4 -A $CHAIN -p icmp -j ACCEPT
+    $V4 -A $CHAIN -p udp --dport 67:68 -j ACCEPT
+    for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+        $V4 -A $CHAIN -s $net -p tcp --dport 631 -j ACCEPT
+    done
+    $V4 -A $CHAIN -j DROP
+    $V4 -I INPUT 1 -j $CHAIN
+
+    $V6 -N $CHAIN
+    common $V6
+    $V6 -A $CHAIN -p ipv6-icmp -j ACCEPT
+    $V6 -A $CHAIN -p udp --dport 546 -j ACCEPT
+    for net in fe80::/10 fc00::/7; do
+        $V6 -A $CHAIN -s $net -p tcp --dport 631 -j ACCEPT
+    done
+    $V6 -A $CHAIN -j DROP
+    $V6 -I INPUT 1 -j $CHAIN
+}
+
+stop() {
+    for T in $V4 $V6; do
+        while $T -D INPUT -j $CHAIN 2>/dev/null; do :; done
+        $T -F $CHAIN 2>/dev/null || true
+        $T -X $CHAIN 2>/dev/null || true
+    done
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    status) $V4 -L $CHAIN -n -v; $V6 -L $CHAIN -n -v ;;
+    *) echo "usage: $0 start|stop|status" >&2; exit 2 ;;
+esac
