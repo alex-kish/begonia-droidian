@@ -1,0 +1,111 @@
+From 91cb720a3ab1080444cca8b274db79e6084dc893 Mon Sep 17 00:00:00 2001
+From: alex-kish <alex-kish@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 03:25:17 +0100
+Subject: [PATCH] lockscreen: optionally submit the PIN once it has the
+ configured length
+
+New setting sm.puri.phosh.lockscreen pin-length (default 0 = off). When
+set, a digits-only entry of exactly that length is submitted right away,
+so the unlock button isn't needed. Passwords and other lengths still use
+the button. A wrong PIN shakes and clears the entry as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ data/mobi.phosh.shell.gschema.xml | 10 ++++++++
+ src/lockscreen.c                  | 38 +++++++++++++++++++++++++++++++
+ 2 files changed, 48 insertions(+)
+
+diff --git a/data/mobi.phosh.shell.gschema.xml b/data/mobi.phosh.shell.gschema.xml
+index 4eef918c..5ec47a14 100644
+--- a/data/mobi.phosh.shell.gschema.xml
++++ b/data/mobi.phosh.shell.gschema.xml
+@@ -178,6 +178,16 @@
+         or password by simply swiping up.
+       </description>
+     </key>
++
++    <key name="pin-length" type="u">
++      <default>0</default>
++      <summary>Length of the PIN for automatic submission</summary>
++      <description>
++        When greater than zero, a PIN (digits only) is submitted as soon as
++        this many digits have been entered, without pressing the unlock
++        button. 0 disables automatic submission.
++      </description>
++    </key>
+   </schema>
+ 
+   <enum id='mobi.phosh.shell.NotificationUrgency'>
+diff --git a/src/lockscreen.c b/src/lockscreen.c
+index fe912121..1d533ece 100644
+--- a/src/lockscreen.c
++++ b/src/lockscreen.c
+@@ -104,6 +104,7 @@ typedef struct {
+   gint64 last_input;
+   PhoshAuth          *auth;
+   GSettings          *lockscreen_settings;
++  guint               auto_submit_id;
+ 
+   struct {
+     GtkGesture *swipe_gesture;
+@@ -453,6 +454,30 @@ long_press_del_cb (PhoshLockscreen *self,
+ }
+ 
+ 
++static void submit_cb (PhoshLockscreen *self);
++
++static void
++on_auto_submit (gpointer user_data)
++{
++  PhoshLockscreen *self = PHOSH_LOCKSCREEN (user_data);
++  PhoshLockscreenPrivate *priv = phosh_lockscreen_get_instance_private (self);
++
++  priv->auto_submit_id = 0;
++  submit_cb (self);
++}
++
++
++static gboolean
++is_pin (const char *text)
++{
++  for (const char *c = text; *c; c++) {
++    if (!g_ascii_isdigit (*c))
++      return FALSE;
++  }
++  return TRUE;
++}
++
++
+ static void
+ input_changed_cb (PhoshLockscreen *self)
+ {
+@@ -466,6 +491,18 @@ input_changed_cb (PhoshLockscreen *self)
+   length = gtk_entry_get_text_length (GTK_ENTRY (priv->entry_pin));
+ 
+   gtk_widget_set_sensitive (priv->btn_submit, length != 0);
++
++  /* Submit a PIN of the configured length right away, without the
++   * unlock button. Passwords (non-digits) still need the button. */
++  if (priv->lockscreen_settings && priv->auth == NULL && priv->auto_submit_id == 0) {
++    guint pin_length = g_settings_get_uint (priv->lockscreen_settings, "pin-length");
++
++    if (pin_length > 0 && length == pin_length &&
++        is_pin (gtk_entry_get_text (GTK_ENTRY (priv->entry_pin)))) {
++      priv->auto_submit_id = g_idle_add_once (on_auto_submit, self);
++      g_source_set_name_by_id (priv->auto_submit_id, "[phosh] lockscreen auto submit");
++    }
++  }
+ }
+ 
+ 
+@@ -996,6 +1033,7 @@ phosh_lockscreen_dispose (GObject *object)
+ 
+   g_clear_object (&priv->notification_settings);
+   g_clear_handle_id (&priv->idle_timer, g_source_remove);
++  g_clear_handle_id (&priv->auto_submit_id, g_source_remove);
+   g_clear_object (&priv->calls_manager);
+   g_clear_pointer (&priv->active, g_free);
+   g_clear_object (&priv->lockscreen_settings);
+-- 
+2.53.0
+
