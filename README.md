@@ -46,6 +46,7 @@ On rotation phoc raised an opaque black "shield" until all layer surfaces re-con
 ### phosh (`group/next/phosh-0.55`)
 
 - `0001` rescales the already loaded wallpaper right away when the background surface gets a new size, instead of after the async cache fetch, so the first frame after a rotation doesn't show the old image plus the fill colour.
+- `0002` adds `sm.puri.phosh.lockscreen pin-length` (default 0 = off). When it's set, a digits-only PIN of that length is submitted as soon as the last digit is entered, without the unlock button. Enable it with `gsettings set sm.puri.phosh.lockscreen pin-length 4`.
 
 ### gnome-usage (Debian 48.0-1)
 
